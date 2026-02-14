@@ -1,0 +1,41 @@
+---
+- name: Check if worker is already joined
+  stat:
+    path: /etc/kubernetes/kubelet.conf
+  register: worker_joined
+
+- name: Reset kubeadm if partially configured
+  shell: kubeadm reset -f
+  when: not worker_joined.stat.exists
+
+- name: Remove old kubernetes directories
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/kubernetes
+    - /var/lib/kubelet
+    - /var/lib/etcd
+  when: not worker_joined.stat.exists
+
+- name: Copy join command to worker
+  copy:
+    src: "{{ join_command_path }}"
+    dest: "{{ join_command_path }}"
+    mode: '0755'
+  when: not worker_joined.stat.exists
+
+- name: Join the cluster
+  shell: "{{ join_command_path }}"
+  when: not worker_joined.stat.exists
+  register: join_result
+
+- name: Display join result
+  debug:
+    msg: "{{ join_result.stdout_lines }}"
+  when: not worker_joined.stat.exists
+
+- name: Clean up join command file
+  file:
+    path: "{{ join_command_path }}"
+    state: absent

@@ -1,0 +1,82 @@
+---
+- name: Check if Kubernetes is already initialized
+  stat:
+    path: /etc/kubernetes/admin.conf
+  register: k8s_initialized
+
+- name: Initialize Kubernetes cluster
+  shell: kubeadm init --pod-network-cidr={{ pod_network_cidr }}
+  when: not k8s_initialized.stat.exists
+  register: kubeadm_init
+
+- name: Create .kube directory for ubuntu user
+  file:
+    path: /home/ubuntu/.kube
+    state: directory
+    owner: ubuntu
+    group: ubuntu
+
+- name: Copy admin.conf to ubuntu user
+  copy:
+    src: /etc/kubernetes/admin.conf
+    dest: /home/ubuntu/.kube/config
+    owner: ubuntu
+    group: ubuntu
+    remote_src: yes
+
+- name: Create .kube directory for root user
+  file:
+    path: /root/.kube
+    state: directory
+
+- name: Copy admin.conf to root user
+  copy:
+    src: /etc/kubernetes/admin.conf
+    dest: /root/.kube/config
+    remote_src: yes
+
+- name: Wait for Kubernetes API to be ready
+  wait_for:
+    port: 6443
+    delay: 10
+    timeout: 300
+
+- name: Check if Flannel is already installed
+  shell: kubectl get daemonset -n kube-flannel kube-flannel-ds 2>/dev/null
+  become_user: ubuntu
+  register: flannel_check
+  changed_when: false
+  failed_when: false
+
+- name: Install Flannel CNI
+  become_user: ubuntu
+  shell: kubectl apply -f {{ flannel_manifest }}
+  when: flannel_check.rc != 0
+
+- name: Wait for CoreDNS to be ready
+  shell: kubectl wait --for=condition=ready pod -l k8s-app=kube-dns -n kube-system --timeout=300s
+  become_user: ubuntu
+  retries: 3
+  delay: 10
+  register: coredns_ready
+  until: coredns_ready.rc == 0
+
+- name: Generate join command
+  shell: kubeadm token create --print-join-command
+  register: join_command_output
+
+- name: Save join command to file on master
+  copy:
+    content: "{{ join_command_output.stdout }}"
+    dest: "{{ join_command_path }}"
+    mode: '0755'
+
+- name: Fetch join command to Ansible controller
+  fetch:
+    src: "{{ join_command_path }}"
+    dest: "{{ join_command_path }}"
+    flat: yes
+
+- name: Display join command
+  debug:
+    msg: "Join command: {{ join_command_output.stdout }}"

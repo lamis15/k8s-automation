@@ -1,0 +1,30 @@
+---
+- name: Common Kubernetes Setup
+  hosts: k8s_cluster
+  become: yes
+  roles:
+    - common
+
+- name: Setup Kubernetes Master
+  hosts: masters
+  become: yes
+  roles:
+    - kubernetes_master
+
+- name: Setup Kubernetes Workers
+  hosts: workers
+  become: yes
+  roles:
+    - kubernetes_worker
+
+- name: Setup Host-Level Monitoring (Node Exporter, Prometheus, Grafana on host)
+  hosts: k8s_cluster
+  become: yes
+  roles:
+    - monitoring
+
+- name: Setup Kubernetes In-Cluster Monitoring (Prometheus + Grafana in K8s)
+  hosts: masters
+  become: yes
+  roles:
+    - k8s_monitoring

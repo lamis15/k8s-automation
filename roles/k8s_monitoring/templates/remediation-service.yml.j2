@@ -1,0 +1,147 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: remediation-service
+  namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: remediation-service
+rules:
+- apiGroups: ["apps"]
+  resources: ["deployments", "deployments/scale"]
+  verbs: ["get", "list", "update", "patch"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: remediation-service
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: remediation-service
+subjects:
+- kind: ServiceAccount
+  name: remediation-service
+  namespace: monitoring
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: remediation-service-script
+  namespace: monitoring
+data:
+  remediation-service.py: |
+    #!/usr/bin/env python3
+    from flask import Flask, request, jsonify
+    import subprocess
+    import json
+    import logging
+
+    app = Flask(__name__)
+    logging.basicConfig(level=logging.INFO)
+
+    REMEDIATION_ACTIONS = {
+        "HighCPUUsage": {
+            "action": "scale_deployment",
+            "deployment": "demo-app",
+            "namespace": "default",
+            "replicas": 5
+        }
+    }
+
+    def run(cmd):
+        p = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        return p.returncode, p.stdout, p.stderr
+
+    @app.route("/health", methods=["GET"])
+    def health():
+        return jsonify({"ok": True})
+
+    @app.route("/webhook", methods=["POST"])
+    def webhook():
+        data = request.get_json(force=True, silent=True) or {}
+        logging.info("Webhook received: %s", json.dumps(data))
+        actions = []
+        for alert in data.get("alerts", []):
+            if alert.get("status") != "firing":
+                continue
+            name = alert.get("labels", {}).get("alertname")
+            if name not in REMEDIATION_ACTIONS:
+                continue
+            rule = REMEDIATION_ACTIONS[name]
+            if rule["action"] == "scale_deployment":
+                cmd = "kubectl scale deployment {} -n {} --replicas={}".format(
+                    rule["deployment"], rule["namespace"], rule["replicas"])
+                rc, out, err = run(cmd)
+                actions.append({"alert": name, "cmd": cmd, "rc": rc, "out": out})
+        return jsonify({"received": True, "actions": actions})
+
+    if __name__ == "__main__":
+        app.run(host="0.0.0.0", port=5001)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: remediation-service
+  namespace: monitoring
+  labels:
+    app: remediation-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: remediation-service
+  template:
+    metadata:
+      labels:
+        app: remediation-service
+    spec:
+      serviceAccountName: remediation-service
+      containers:
+      - name: remediation
+        image: python:3.9-slim
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            apt-get update -qq && apt-get install -y -qq curl > /dev/null && \
+            curl -sLO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" && \
+            chmod +x kubectl && mv kubectl /usr/local/bin/ && \
+            pip install -q flask && \
+            python3 /app/remediation-service.py
+        ports:
+        - containerPort: 5001
+        volumeMounts:
+        - name: script
+          mountPath: /app
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
+      volumes:
+      - name: script
+        configMap:
+          name: remediation-service-script
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: remediation-service
+  namespace: monitoring
+  labels:
+    app: remediation-service
+spec:
+  ports:
+  - port: 5001
+    targetPort: 5001
+    name: http
+  selector:
+    app: remediation-service

@@ -1,0 +1,168 @@
+---
+- name: Create monitoring namespace
+  become_user: ubuntu
+  shell: kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
+
+- name: Copy kube-state-metrics manifest
+  become_user: ubuntu
+  template:
+    src: kube-state-metrics.yml.j2
+    dest: /tmp/kube-state-metrics.yml
+
+- name: Apply kube-state-metrics
+  become_user: ubuntu
+  shell: kubectl apply -f /tmp/kube-state-metrics.yml
+
+- name: Copy Prometheus config and alert rules
+  become_user: ubuntu
+  template:
+    src: prometheus-config.yml.j2
+    dest: /tmp/prometheus-config.yml
+
+- name: Apply Prometheus config
+  become_user: ubuntu
+  shell: kubectl apply -f /tmp/prometheus-config.yml
+
+- name: Copy Prometheus Deployment
+  become_user: ubuntu
+  template:
+    src: prometheus-deployment.yml.j2
+    dest: /tmp/prometheus-deployment.yml
+
+- name: Apply Prometheus Deployment
+  become_user: ubuntu
+  shell: kubectl apply -f /tmp/prometheus-deployment.yml
+
+- name: Copy Alertmanager Deployment
+  become_user: ubuntu
+  template:
+    src: alertmanager-deployment.yml.j2
+    dest: /tmp/alertmanager-deployment.yml
+
+- name: Apply Alertmanager Deployment
+  become_user: ubuntu
+  shell: kubectl apply -f /tmp/alertmanager-deployment.yml
+
+- name: Copy Grafana Deployment with dashboards
+  become_user: ubuntu
+  template:
+    src: grafana-deployment.yml.j2
+    dest: /tmp/grafana-deployment.yml
+
+- name: Apply Grafana Deployment
+  become_user: ubuntu
+  shell: kubectl apply -f /tmp/grafana-deployment.yml
+
+- name: Wait for kube-state-metrics to be ready
+  become_user: ubuntu
+  shell: kubectl wait --for=condition=ready pod -l app=kube-state-metrics -n monitoring --timeout=300s
+  retries: 3
+  delay: 10
+  register: ksm_ready
+  until: ksm_ready.rc == 0
+
+- name: Wait for Prometheus to be ready
+  become_user: ubuntu
+  shell: kubectl wait --for=condition=ready pod -l app=prometheus -n monitoring --timeout=300s
+  retries: 3
+  delay: 10
+  register: prometheus_ready
+  until: prometheus_ready.rc == 0
+
+- name: Wait for Alertmanager to be ready
+  become_user: ubuntu
+  shell: kubectl wait --for=condition=ready pod -l app=alertmanager -n monitoring --timeout=300s
+  retries: 3
+  delay: 10
+  register: alertmanager_ready
+  until: alertmanager_ready.rc == 0
+
+- name: Wait for Grafana to be ready
+  become_user: ubuntu
+  shell: kubectl wait --for=condition=ready pod -l app=grafana -n monitoring --timeout=300s
+  retries: 3
+  delay: 10
+  register: grafana_ready
+  until: grafana_ready.rc == 0
+
+- name: Get all monitoring services
+  become_user: ubuntu
+  shell: kubectl get svc -n monitoring
+  register: monitoring_services
+
+- name: Get all monitoring pods
+  become_user: ubuntu
+  shell: kubectl get pods -n monitoring
+  register: monitoring_pods
+
+- name: Display monitoring access info
+  debug:
+    msg:
+      - "==============================================="
+      - "   Monitoring Stack Deployed Successfully!    "
+      - "==============================================="
+      - "Grafana:      http://{{ ansible_host }}:{{ grafana_nodeport }}"
+      - "Prometheus:   http://{{ ansible_host }}:{{ prometheus_nodeport }}"
+      - "Alertmanager: http://{{ ansible_host }}:{{ alertmanager_nodeport }}"
+      - "Grafana credentials: admin / {{ grafana_admin_password }}"
+      - "==============================================="
+      - "Dashboards: Kubernetes Cluster Overview"
+      - "           Node Exporter Infrastructure"
+      - "Alerts:    HighCPU, HighMemory, HighDisk,"
+      - "           NodeDown, PodCrashLoop, PodNotReady"
+      - "==============================================="
+      - ""
+      - "{{ monitoring_pods.stdout }}"
+      - ""
+      - "{{ monitoring_services.stdout }}"
+
+- name: Copy remediation service Python script
+  copy:
+    src: remediation-service.py
+    dest: /tmp/remediation-service.py
+
+- name: Deploy remediation service
+  become_user: ubuntu
+  template:
+    src: remediation-service.yml.j2
+    dest: /tmp/remediation-service.yml
+
+- name: Apply remediation service
+  become_user: ubuntu
+  shell: kubectl apply -f /tmp/remediation-service.yml
+
+- name: Deploy demo application
+  become_user: ubuntu
+  template:
+    src: demo-app.yml.j2
+    dest: /tmp/demo-app.yml
+
+- name: Apply demo application
+  become_user: ubuntu
+  shell: kubectl apply -f /tmp/demo-app.yml
+
+- name: Wait for remediation service to be ready
+  become_user: ubuntu
+  shell: kubectl wait --for=condition=ready pod -l app=remediation-service -n monitoring --timeout=300s
+  retries: 3
+  delay: 10
+  register: remediation_ready
+  until: remediation_ready.rc == 0
+
+- name: Display auto-remediation info
+  debug:
+    msg:
+      - "==============================================="
+      - "   AUTO-REMEDIATION SERVICE DEPLOYED!         "
+      - "==============================================="
+      - "Remediation Service: Active"
+      - "Demo App: http://{{ ansible_host }}:30080"
+      - ""
+      - "Automated Actions Configured:"
+      - "  - HighCPUUsage → Auto-scale to 5 replicas"
+      - "  - HighMemoryUsage → Auto-restart deployment"
+      - "  - PodCrashLooping → Auto-restart pod"
+      - ""
+      - "Test Command:"
+      - "  kubectl run cpu-stress --image=polinux/stress -- stress --cpu 4 --timeout 300s"
+      - "==============================================="

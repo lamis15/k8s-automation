@@ -1,0 +1,195 @@
+---
+- name: Create node_exporter user
+  user:
+    name: node_exporter
+    shell: /bin/false
+    create_home: no
+    system: yes
+
+- name: Download Node Exporter
+  get_url:
+    url: "https://github.com/prometheus/node_exporter/releases/download/v1.7.0/node_exporter-1.7.0.linux-amd64.tar.gz"
+    dest: /tmp/node_exporter.tar.gz
+    timeout: 60
+  retries: 5
+  delay: 10
+  register: node_exporter_download
+  until: node_exporter_download is success
+
+- name: Extract Node Exporter
+  unarchive:
+    src: /tmp/node_exporter.tar.gz
+    dest: /tmp/
+    remote_src: yes
+
+- name: Install Node Exporter binary
+  copy:
+    src: /tmp/node_exporter-1.7.0.linux-amd64/node_exporter
+    dest: /usr/local/bin/node_exporter
+    mode: '0755'
+    owner: node_exporter
+    group: node_exporter
+    remote_src: yes
+
+- name: Create Node Exporter systemd service
+  copy:
+    dest: /etc/systemd/system/node_exporter.service
+    content: |
+      [Unit]
+      Description=Node Exporter
+      After=network.target
+
+      [Service]
+      User=node_exporter
+      Group=node_exporter
+      Type=simple
+      ExecStart=/usr/local/bin/node_exporter
+
+      [Install]
+      WantedBy=multi-user.target
+  notify: restart node_exporter
+
+- name: Enable and start Node Exporter
+  systemd:
+    name: node_exporter
+    state: started
+    enabled: yes
+    daemon_reload: yes
+
+- name: Create prometheus user
+  user:
+    name: prometheus
+    shell: /bin/false
+    create_home: no
+    system: yes
+  when: "'masters' in group_names"
+
+- name: Create Prometheus directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: prometheus
+    group: prometheus
+    mode: '0755'
+  loop:
+    - "{{ prometheus_config_dir }}"
+    - "{{ prometheus_data_dir }}"
+  when: "'masters' in group_names"
+
+- name: Download Prometheus
+  get_url:
+    url: "https://github.com/prometheus/prometheus/releases/download/v{{ prometheus_version }}/prometheus-{{ prometheus_version }}.linux-amd64.tar.gz"
+    dest: /tmp/prometheus.tar.gz
+    timeout: 60
+  when: "'masters' in group_names"
+  retries: 5
+  delay: 10
+  register: prometheus_download
+  until: prometheus_download is success
+
+- name: Extract Prometheus
+  unarchive:
+    src: /tmp/prometheus.tar.gz
+    dest: /tmp/
+    remote_src: yes
+  when: "'masters' in group_names"
+
+- name: Install Prometheus binaries
+  copy:
+    src: "/tmp/prometheus-{{ prometheus_version }}.linux-amd64/{{ item }}"
+    dest: "/usr/local/bin/{{ item }}"
+    mode: '0755'
+    owner: prometheus
+    group: prometheus
+    remote_src: yes
+  loop:
+    - prometheus
+    - promtool
+  when: "'masters' in group_names"
+
+- name: Configure Prometheus
+  template:
+    src: prometheus.yml.j2
+    dest: "{{ prometheus_config_dir }}/prometheus.yml"
+    owner: prometheus
+    group: prometheus
+  notify: restart prometheus
+  when: "'masters' in group_names"
+
+- name: Create Prometheus systemd service
+  copy:
+    dest: /etc/systemd/system/prometheus.service
+    content: |
+      [Unit]
+      Description=Prometheus
+      After=network.target
+
+      [Service]
+      User=prometheus
+      Group=prometheus
+      Type=simple
+      ExecStart=/usr/local/bin/prometheus \
+        --config.file={{ prometheus_config_dir }}/prometheus.yml \
+        --storage.tsdb.path={{ prometheus_data_dir }} \
+        --web.listen-address=0.0.0.0:{{ prometheus_port }}
+
+      [Install]
+      WantedBy=multi-user.target
+  notify: restart prometheus
+  when: "'masters' in group_names"
+
+- name: Enable and start Prometheus
+  systemd:
+    name: prometheus
+    state: started
+    enabled: yes
+    daemon_reload: yes
+  when: "'masters' in group_names"
+
+- name: Add Grafana apt key
+  shell: |
+    curl -fsSL https://apt.grafana.com/gpg.key | gpg --dearmor -o /etc/apt/keyrings/grafana.gpg
+  args:
+    creates: /etc/apt/keyrings/grafana.gpg
+  when: "'masters' in group_names"
+
+- name: Add Grafana repository
+  apt_repository:
+    repo: "deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://apt.grafana.com stable main"
+    state: present
+    filename: grafana
+  when: "'masters' in group_names"
+
+- name: Install Grafana
+  apt:
+    name: grafana
+    state: present
+    update_cache: yes
+  when: "'masters' in group_names"
+  retries: 3
+  delay: 10
+  register: grafana_install
+  until: grafana_install is success
+
+- name: Configure Grafana port
+  lineinfile:
+    path: /etc/grafana/grafana.ini
+    regexp: '^;http_port'
+    line: "http_port = {{ grafana_port }}"
+  notify: restart grafana
+  when: "'masters' in group_names"
+
+- name: Enable and start Grafana
+  systemd:
+    name: grafana-server
+    state: started
+    enabled: yes
+    daemon_reload: yes
+  when: "'masters' in group_names"
+
+- name: Display monitoring URLs
+  debug:
+    msg:
+      - "Prometheus: http://{{ ansible_host }}:{{ prometheus_port }}"
+      - "Grafana:    http://{{ ansible_host }}:{{ grafana_port }} (admin/admin)"
+  when: "'masters' in group_names"

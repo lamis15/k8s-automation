@@ -1,0 +1,303 @@
+heat_template_version: '2015-10-15'
+
+description: >
+  Kubernetes Cluster - 1 Master + 2 Workers
+  Fully automated with Ansible
+
+parameters:
+  KeyName:
+    type: string
+    default: mykey1
+    description: SSH key for instance access
+
+  ImageID:
+    type: string
+    default: e2958bad-81a6-412b-bfb8-ed665e92c900
+    description: Ubuntu-22.04-Cloud image ID
+
+  MasterFlavor:
+    type: string
+    default: k8s-master-flavor
+    description: Flavor for master node
+
+  WorkerFlavor:
+    type: string
+    default: k8s-master-flavor
+    description: Flavor for worker nodes
+
+  VolumeSize:
+    type: number
+    default: 40
+    description: Boot volume size in GB
+
+  ProviderNetworkName:
+    type: string
+    default: provider
+    description: Existing provider network
+
+  StackPrefix:
+    type: string
+    default: k8s
+    description: Prefix for all resource names
+
+resources:
+  # ==================== NETWORK ====================
+  k8s_network:
+    type: OS::Neutron::Net
+    properties:
+      name:
+        str_replace:
+          template: PREFIX-net
+          params:
+            PREFIX: { get_param: StackPrefix }
+      admin_state_up: true
+
+  k8s_subnet:
+    type: OS::Neutron::Subnet
+    properties:
+      name:
+        str_replace:
+          template: PREFIX-subnet
+          params:
+            PREFIX: { get_param: StackPrefix }
+      network: { get_resource: k8s_network }
+      cidr: 10.70.70.0/24
+      gateway_ip: 10.70.70.1
+      enable_dhcp: true
+      allocation_pools:
+        - start: 10.70.70.10
+          end: 10.70.70.250
+      dns_nameservers:
+        - 8.8.8.8
+        - 8.8.4.4
+
+  # ==================== ROUTER ====================
+  k8s_router:
+    type: OS::Neutron::Router
+    properties:
+      name:
+        str_replace:
+          template: PREFIX-router
+          params:
+            PREFIX: { get_param: StackPrefix }
+      admin_state_up: true
+      external_gateway_info:
+        network: { get_param: ProviderNetworkName }
+
+  k8s_router_interface:
+    type: OS::Neutron::RouterInterface
+    properties:
+      router: { get_resource: k8s_router }
+      subnet: { get_resource: k8s_subnet }
+
+  # ==================== SECURITY GROUP ====================
+  k8s_security_group:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      name:
+        str_replace:
+          template: PREFIX-sg
+          params:
+            PREFIX: { get_param: StackPrefix }
+      rules:
+        - protocol: icmp
+          direction: ingress
+          remote_ip_prefix: 0.0.0.0/0
+        - protocol: tcp
+          port_range_min: 1
+          port_range_max: 65535
+          direction: ingress
+          remote_ip_prefix: 0.0.0.0/0
+        - protocol: udp
+          port_range_min: 1
+          port_range_max: 65535
+          direction: ingress
+          remote_ip_prefix: 0.0.0.0/0
+
+  # ==================== MASTER ====================
+  master_volume:
+    type: OS::Cinder::Volume
+    properties:
+      name:
+        str_replace:
+          template: PREFIX-master-vol
+          params:
+            PREFIX: { get_param: StackPrefix }
+      size: { get_param: VolumeSize }
+      image: { get_param: ImageID }
+
+  master_port:
+    type: OS::Neutron::Port
+    properties:
+      network: { get_resource: k8s_network }
+      security_groups:
+        - { get_resource: k8s_security_group }
+      fixed_ips:
+        - subnet: { get_resource: k8s_subnet }
+
+  master_instance:
+    type: OS::Nova::Server
+    depends_on:
+      - worker1_instance
+      - worker2_instance
+      - k8s_router_interface
+    properties:
+      name:
+        str_replace:
+          template: PREFIX-master
+          params:
+            PREFIX: { get_param: StackPrefix }
+      flavor: { get_param: MasterFlavor }
+      key_name: { get_param: KeyName }
+      config_drive: true
+      networks:
+        - port: { get_resource: master_port }
+      block_device_mapping_v2:
+        - device_name: vda
+          volume_id: { get_resource: master_volume }
+          delete_on_termination: true
+      user_data_format: RAW
+      user_data:
+        str_replace:
+          template: |
+            #!/bin/bash
+            hostnamectl set-hostname PREFIX-master
+          params:
+            PREFIX: { get_param: StackPrefix }
+
+  master_floating_ip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network: { get_param: ProviderNetworkName }
+      port_id: { get_resource: master_port }
+
+  # ==================== WORKER 1 ====================
+  worker1_volume:
+    type: OS::Cinder::Volume
+    properties:
+      name:
+        str_replace:
+          template: PREFIX-worker1-vol
+          params:
+            PREFIX: { get_param: StackPrefix }
+      size: { get_param: VolumeSize }
+      image: { get_param: ImageID }
+
+  worker1_port:
+    type: OS::Neutron::Port
+    properties:
+      network: { get_resource: k8s_network }
+      security_groups:
+        - { get_resource: k8s_security_group }
+      fixed_ips:
+        - subnet: { get_resource: k8s_subnet }
+
+  worker1_instance:
+    type: OS::Nova::Server
+    properties:
+      name:
+        str_replace:
+          template: PREFIX-worker-1
+          params:
+            PREFIX: { get_param: StackPrefix }
+      flavor: { get_param: WorkerFlavor }
+      key_name: { get_param: KeyName }
+      config_drive: true
+      networks:
+        - port: { get_resource: worker1_port }
+      block_device_mapping_v2:
+        - device_name: vda
+          volume_id: { get_resource: worker1_volume }
+          delete_on_termination: true
+      user_data_format: RAW
+      user_data:
+        str_replace:
+          template: |
+            #!/bin/bash
+            hostnamectl set-hostname PREFIX-worker-1
+          params:
+            PREFIX: { get_param: StackPrefix }
+
+  worker1_floating_ip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network: { get_param: ProviderNetworkName }
+      port_id: { get_resource: worker1_port }
+
+  # ==================== WORKER 2 ====================
+  worker2_volume:
+    type: OS::Cinder::Volume
+    properties:
+      name:
+        str_replace:
+          template: PREFIX-worker2-vol
+          params:
+            PREFIX: { get_param: StackPrefix }
+      size: { get_param: VolumeSize }
+      image: { get_param: ImageID }
+
+  worker2_port:
+    type: OS::Neutron::Port
+    properties:
+      network: { get_resource: k8s_network }
+      security_groups:
+        - { get_resource: k8s_security_group }
+      fixed_ips:
+        - subnet: { get_resource: k8s_subnet }
+
+  worker2_instance:
+    type: OS::Nova::Server
+    properties:
+      name:
+        str_replace:
+          template: PREFIX-worker-2
+          params:
+            PREFIX: { get_param: StackPrefix }
+      flavor: { get_param: WorkerFlavor }
+      key_name: { get_param: KeyName }
+      config_drive: true
+      networks:
+        - port: { get_resource: worker2_port }
+      block_device_mapping_v2:
+        - device_name: vda
+          volume_id: { get_resource: worker2_volume }
+          delete_on_termination: true
+      user_data_format: RAW
+      user_data:
+        str_replace:
+          template: |
+            #!/bin/bash
+            hostnamectl set-hostname PREFIX-worker-2
+          params:
+            PREFIX: { get_param: StackPrefix }
+
+  worker2_floating_ip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network: { get_param: ProviderNetworkName }
+      port_id: { get_resource: worker2_port }
+
+outputs:
+  master_floating_ip:
+    description: Master floating IP
+    value: { get_attr: [master_floating_ip, floating_ip_address] }
+
+  master_private_ip:
+    description: Master private IP
+    value: { get_attr: [master_instance, first_address] }
+
+  worker1_floating_ip:
+    description: Worker 1 floating IP
+    value: { get_attr: [worker1_floating_ip, floating_ip_address] }
+
+  worker1_private_ip:
+    description: Worker 1 private IP
+    value: { get_attr: [worker1_instance, first_address] }
+
+  worker2_floating_ip:
+    description: Worker 2 floating IP
+    value: { get_attr: [worker2_floating_ip, floating_ip_address] }
+
+  worker2_private_ip:
+    description: Worker 2 private IP
+    value: { get_attr: [worker2_instance, first_address] }
