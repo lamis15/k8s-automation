@@ -41,6 +41,18 @@ parameters:
     description: Prefix for all resource names
 
 resources:
+  # ==================== SERVER GROUP (ANTI-AFFINITY) ====================
+  k8s_server_group:
+    type: OS::Nova::ServerGroup
+    properties:
+      name:
+        str_replace:
+          template: PREFIX-server-group
+          params:
+            PREFIX: { get_param: StackPrefix }
+      policies:
+        - soft-anti-affinity
+
   # ==================== NETWORK ====================
   k8s_network:
     type: OS::Neutron::Net
@@ -150,6 +162,8 @@ resources:
       flavor: { get_param: MasterFlavor }
       key_name: { get_param: KeyName }
       config_drive: true
+      scheduler_hints:
+        group: { get_resource: k8s_server_group }
       networks:
         - port: { get_resource: master_port }
       block_device_mapping_v2:
@@ -203,6 +217,8 @@ resources:
       flavor: { get_param: WorkerFlavor }
       key_name: { get_param: KeyName }
       config_drive: true
+      scheduler_hints:
+        group: { get_resource: k8s_server_group }
       networks:
         - port: { get_resource: worker1_port }
       block_device_mapping_v2:
@@ -256,6 +272,8 @@ resources:
       flavor: { get_param: WorkerFlavor }
       key_name: { get_param: KeyName }
       config_drive: true
+      scheduler_hints:
+        group: { get_resource: k8s_server_group }
       networks:
         - port: { get_resource: worker2_port }
       block_device_mapping_v2:
