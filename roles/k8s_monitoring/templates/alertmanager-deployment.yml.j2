@@ -9,22 +9,36 @@ data:
     global:
       resolve_timeout: 5m
       slack_api_url: '{{ slack_webhook_url }}'
+
     route:
-      group_by: ['alertname', 'namespace']
+      group_by: ['alertname', 'namespace', 'instance']
       group_wait: 10s
       group_interval: 10s
       repeat_interval: 1h
       receiver: 'slack-and-remediation'
+
     receivers:
       - name: 'slack-and-remediation'
         slack_configs:
           - channel: '{{ slack_channel }}'
             send_resolved: true
-            title: 'Alert Notification'
-            text: 'Alert: firing on cluster'
+            color: '{% raw %}{{ if eq .Status "firing" }}danger{{ else }}good{{ end }}{% endraw %}'
+            title: '{% raw %}[{{ .Status | toUpper }}] {{ .GroupLabels.alertname }}{% endraw %}'
+            text: |
+              {% raw %}{{ range .Alerts }}
+              *Alert:* {{ .Labels.alertname }}
+              *Severity:* {{ .Labels.severity }}
+              *Instance:* {{ .Labels.instance }}
+              *Description:* {{ .Annotations.description }}
+              *Summary:* {{ .Annotations.summary }}
+              *Time:* {{ .StartsAt.Format "15:04:05" }}
+              -------------------------
+              {{ end }}{% endraw %}
+
         webhook_configs:
           - url: 'http://remediation-service.monitoring.svc.cluster.local:5001/webhook'
             send_resolved: false
+
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -56,19 +70,13 @@ spec:
           mountPath: /etc/alertmanager
         - name: alertmanager-storage
           mountPath: /alertmanager
-        resources:
-          requests:
-            cpu: 50m
-            memory: 128Mi
-          limits:
-            cpu: 200m
-            memory: 256Mi
       volumes:
       - name: alertmanager-config
         configMap:
           name: alertmanager-config
       - name: alertmanager-storage
         emptyDir: {}
+
 ---
 apiVersion: v1
 kind: Service

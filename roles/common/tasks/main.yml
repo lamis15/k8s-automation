@@ -1,4 +1,13 @@
 ---
+- name: Kill any running apt processes
+  shell: |
+    killall apt apt-get dpkg 2>/dev/null || true
+    rm -f /var/lib/apt/lists/lock
+    rm -f /var/lib/dpkg/lock-frontend
+    rm -f /var/lib/dpkg/lock
+    rm -f /var/cache/apt/archives/lock
+  changed_when: false
+
 - name: Fix hostname resolution
   lineinfile:
     path: /etc/hosts
@@ -10,54 +19,24 @@
   hostname:
     name: "{{ inventory_hostname }}"
 
-- name: Remove immutable flag from resolv.conf
-  command: chattr -i /etc/resolv.conf
-  ignore_errors: yes
-  failed_when: false
-  changed_when: false
-
-- name: Stop and disable systemd-resolved
-  systemd:
-    name: systemd-resolved
-    state: stopped
-    enabled: no
-  ignore_errors: yes
-
-- name: Remove old resolv.conf
-  file:
-    path: /etc/resolv.conf
-    state: absent
-
-- name: Create permanent resolv.conf
+- name: Configure DNS
   copy:
     dest: /etc/resolv.conf
     content: |
+      nameserver 1.1.1.1
       nameserver 8.8.8.8
-      nameserver 8.8.4.4
+      nameserver 9.9.9.9
+      options use-vc timeout:1 attempts:3 rotate
     mode: '0644'
     owner: root
     group: root
 
-- name: Lock resolv.conf from being overwritten
-  shell: chattr +i /etc/resolv.conf
-  ignore_errors: yes
-
-- name: Verify DNS works
-  shell: ping -c 1 google.com
-  register: dns_test
-  retries: 10
-  delay: 5
-  until: dns_test.rc == 0
-
-- name: Update apt cache (Force)
-  apt:
-    update_cache: yes
-    force_apt_get: yes
-    cache_valid_time: 0
-  register: apt_update
-  retries: 10
+- name: Update apt cache
+  shell: apt-get update -o Acquire::ForceIPv4=true -o Acquire::Retries=5
+  retries: 3
   delay: 10
-  until: apt_update is success
+  register: apt_update
+  until: apt_update.rc == 0
 
 - name: Install required packages
   apt:
@@ -69,10 +48,6 @@
       - software-properties-common
       - conntrack
     state: present
-  register: pkg_install
-  retries: 10
-  delay: 10
-  until: pkg_install is success
 
 - name: Disable swap
   shell: swapoff -a
@@ -108,15 +83,13 @@
     - { name: 'net.bridge.bridge-nf-call-iptables', value: '1' }
     - { name: 'net.bridge.bridge-nf-call-ip6tables', value: '1' }
     - { name: 'net.ipv4.ip_forward', value: '1' }
+    - { name: 'net.ipv6.conf.all.disable_ipv6', value: '1' }
+    - { name: 'net.ipv6.conf.default.disable_ipv6', value: '1' }
 
 - name: Install containerd
   apt:
     name: containerd
     state: present
-  register: containerd_install
-  retries: 5
-  delay: 10
-  until: containerd_install is success
 
 - name: Create containerd config directory
   file:
@@ -139,29 +112,30 @@
     state: directory
     mode: '0755'
 
-- name: Add Kubernetes apt key
-  shell: |
-    curl -fsSL https://pkgs.k8s.io/core:/stable:/{{ kubernetes_version }}/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-  args:
-    creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-  register: key_add
-  retries: 5
+- name: Remove old keyring
+  file:
+    path: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+    state: absent
+
+- name: Download Kubernetes Release key
+  shell: curl -fsSL --retry 5 --retry-delay 5 https://pkgs.k8s.io/core:/stable:/{{ kubernetes_version }}/deb/Release.key -o /tmp/k8s-release.key
+  retries: 3
   delay: 10
-  until: key_add.rc == 0
+  register: key_download
+  until: key_download.rc == 0
+
+- name: Install Kubernetes apt keyring
+  shell: gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg /tmp/k8s-release.key && chmod 0644 /etc/apt/keyrings/kubernetes-apt-keyring.gpg
 
 - name: Add Kubernetes repository
   apt_repository:
     repo: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/{{ kubernetes_version }}/deb/ /"
     state: present
     filename: kubernetes
+    update_cache: no
 
 - name: Update apt cache after adding Kubernetes repo
-  apt:
-    update_cache: yes
-  register: apt_update_k8s
-  retries: 5
-  delay: 10
-  until: apt_update_k8s is success
+  shell: apt-get update -o Acquire::ForceIPv4=true -o Acquire::Retries=5
 
 - name: Install Kubernetes components
   apt:
@@ -170,10 +144,6 @@
       - kubeadm
       - kubectl
     state: present
-  register: k8s_install
-  retries: 5
-  delay: 10
-  until: k8s_install is success
 
 - name: Hold Kubernetes packages
   dpkg_selections:

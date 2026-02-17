@@ -1,0 +1,6 @@
+---
+- name: Update Kubernetes Monitoring
+  hosts: masters
+  become: yes
+  roles:
+    - k8s_monitoring
